@@ -174,3 +174,149 @@ fn base_units(value: &str, decimals: u32) -> Option<u64> {
     }
     digits.parse().ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use price_feed::{RejectionReason, registry::FEED_DECIMALS};
+    use serde_json::json;
+
+    use super::*;
+
+    const NOW: u64 = 1_700_000_000;
+
+    fn body(canonical: &str) -> Value {
+        json!({ "canonical": canonical, "signature": "…", "pubkey": "…" })
+    }
+
+    fn btc() -> Route {
+        Route {
+            path: "/oracle/price/btc/usd",
+            pair: "BTCUSD",
+            decimals: FEED_DECIMALS,
+        }
+    }
+
+    /// A live BTCUSD canonical, 2026-09-28.
+    const LIVE_BTC: &str =
+        "v1|PRICE|BTCUSD|82786.21|USD|2|binance,bitfinex,coinbase|median|1700000000|843311";
+
+    #[test]
+    fn reads_the_price_out_of_the_canonical_at_the_feeds_decimals() {
+        let observation = observation(&body(LIVE_BTC), btc(), NOW).unwrap();
+
+        assert_eq!(observation.price, 8_278_621_000_000);
+        assert_eq!(observation.decimals, FEED_DECIMALS);
+        assert_eq!(observation.observed_at, 1_700_000_000);
+        assert_eq!(observation.received_at, NOW);
+    }
+
+    /// The five Direct feeds as they were quoted on 2026-09-28.
+    #[test]
+    fn scales_every_live_feed_exactly() {
+        let cases = [
+            ("BTCUSD", "82786.21", 8_278_621_000_000_u64),
+            ("USDTUSD", "0.99954", 99_954_000),
+            ("EURUSD", "1.13778", 113_778_000),
+            ("BRLUSD", "0.191837", 19_183_700),
+            ("USDCUSD", "0.99982", 99_982_000),
+        ];
+
+        for (pair, value, expected) in cases {
+            let canonical = format!("v1|PRICE|{pair}|{value}|USD|2|a,b|median|1700000000|1");
+            let route = Route {
+                path: "/p",
+                pair,
+                decimals: FEED_DECIMALS,
+            };
+
+            let observation = observation(&body(&canonical), route, NOW).unwrap();
+
+            assert_eq!(observation.price, expected, "{pair}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_canonical_for_another_pair() {
+        let eur = "v1|PRICE|EURUSD|1.13778|USD|5|a,b|median|1700000000|1";
+
+        assert_eq!(
+            observation(&body(eur), btc(), NOW),
+            Err(ConnectionError::MalformedResponse)
+        );
+    }
+
+    #[test]
+    fn refuses_a_canonical_that_prices_nothing() {
+        // Another signed product, a truncated string, and no canonical at all.
+        let sentiment = "v2|SENTIMENT|BTCUSD|-28.09|INDEX|2|a|x|1700000000|1";
+        let truncated = "v1|PRICE|BTCUSD|82786.21";
+
+        for canonical in [sentiment, truncated] {
+            assert_eq!(
+                observation(&body(canonical), btc(), NOW),
+                Err(ConnectionError::MalformedResponse)
+            );
+        }
+        assert_eq!(
+            observation(&json!({ "price": 82786.21 }), btc(), NOW),
+            Err(ConnectionError::MalformedResponse)
+        );
+    }
+
+    #[test]
+    fn reads_no_price_that_is_not_a_plain_decimal() {
+        for value in ["", "1e5", "-1.0", "1.2.3", "8_2", " 1"] {
+            assert_eq!(base_units(value, FEED_DECIMALS), None, "{value}");
+        }
+    }
+
+    /// Rounding a signed value away would change what the source attested to.
+    #[test]
+    fn refuses_more_precision_than_the_feed_can_hold() {
+        assert_eq!(base_units("1.234567890", FEED_DECIMALS), None);
+        assert_eq!(base_units("1.12345678", FEED_DECIMALS), Some(112_345_678));
+    }
+
+    #[test]
+    fn pads_a_short_fraction_and_a_bare_integer() {
+        assert_eq!(base_units("1.5", FEED_DECIMALS), Some(150_000_000));
+        assert_eq!(base_units("7", FEED_DECIMALS), Some(700_000_000));
+        assert_eq!(base_units("0.00000001", FEED_DECIMALS), Some(1));
+    }
+
+    /// `validate` is what rejects a zero price, so the parse must let it
+    /// through rather than mask it as a malformed response.
+    #[test]
+    fn parses_a_zero_price_and_leaves_the_rejection_to_validate() {
+        let zero = "v1|PRICE|BTCUSD|0|USD|2|a|median|1700000000|1";
+
+        let observation = observation(&body(zero), btc(), NOW).unwrap();
+
+        assert_eq!(observation.price, 0);
+        assert_eq!(
+            Mycelia::validate(&observation, None),
+            Err(RejectionReason::InvalidPrice)
+        );
+    }
+
+    #[test]
+    fn prices_the_five_direct_usd_feeds_and_no_others() {
+        let priced: Vec<FeedId> = FeedRegistry::default()
+            .feeds()
+            .filter(|definition| {
+                definition.kind == FeedKind::Direct && route(definition.base).is_some()
+            })
+            .map(|definition| definition.id)
+            .collect();
+
+        assert_eq!(priced, [0, 1, 2, 3, 7]);
+    }
+
+    /// EURx and DePix have no source in high-storm, so a feed each that would
+    /// otherwise answer 503 permanently.
+    #[test]
+    fn prices_the_two_feeds_coingecko_cannot() {
+        assert_eq!(route(Asset::Eurx).map(|(_, pair)| pair), Some("EURUSD"));
+        assert_eq!(route(Asset::DePix).map(|(_, pair)| pair), Some("BRLUSD"));
+    }
+}
