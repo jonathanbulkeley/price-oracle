@@ -1,9 +1,8 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 use price_feed::{
     Asset, Clock, ConnectionError, FeedId, FeedKind, FeedRegistry, PriceSource, SourceObservation,
 };
-use rustls::{ClientConfig, RootCertStore, crypto::aws_lc_rs};
 use serde_json::Value;
 
 use crate::config::CoinGeckoConfig;
@@ -47,7 +46,7 @@ impl CoinGecko {
 
         Ok(Self {
             client: reqwest::Client::builder()
-                .use_preconfigured_tls(tls())
+                .use_preconfigured_tls(super::tls())
                 .user_agent(USER_AGENT)
                 .timeout(REQUEST_TIMEOUT)
                 .build()?,
@@ -79,19 +78,6 @@ impl CoinGecko {
             .await
             .map_err(|_| ConnectionError::MalformedResponse)
     }
-}
-
-/// reqwest's rustls backend brings no crypto of its own, so the client carries
-/// its TLS configuration instead of relying on a process-wide default.
-fn tls() -> ClientConfig {
-    let roots = RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-    ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
-        .with_safe_default_protocol_versions()
-        .expect("aws-lc-rs supports the default protocol versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth()
 }
 
 /// CoinGecko prices LBTC as Bitcoin, which LBTC is pegged to one-to-one. It

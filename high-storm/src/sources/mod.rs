@@ -1,4 +1,5 @@
 pub mod coingecko;
+pub mod mycelia;
 
 use std::{future::Future, sync::Arc, time::Duration};
 
@@ -11,6 +12,20 @@ use coingecko::CoinGecko;
 
 /// The source's index in every feed's state.
 const COINGECKO: usize = 0;
+
+/// reqwest's rustls backend brings no crypto of its own, so a client carries
+/// its TLS configuration instead of relying on a process-wide default.
+pub(crate) fn tls() -> rustls::ClientConfig {
+    use rustls::{ClientConfig, RootCertStore, crypto::aws_lc_rs};
+    let roots = RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    ClientConfig::builder_with_provider(std::sync::Arc::new(aws_lc_rs::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("aws-lc-rs supports the default protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+}
 
 /// Polls every configured source, each feed on its own task. The returned
 /// `Notify` fires on every new observation, which is when the node attests.

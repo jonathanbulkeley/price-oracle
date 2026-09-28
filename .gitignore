@@ -11,3 +11,4 @@ contracts/deps
 contracts/src/artifacts
 
 node_modules/
+devshell.ps1

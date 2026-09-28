@@ -119,11 +119,22 @@ pub struct DbConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct PriceSourcesConfig {
     pub coingecko: Option<CoinGeckoConfig>,
+    pub mycelia: Option<MyceliaConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct CoinGeckoConfig {
     /// A Demo API key, which lifts the public API's per-IP rate limit.
+    pub api_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MyceliaConfig {
+    /// The base URL of the price service, without a trailing path, for example
+    /// `https://prices.myceliasignal.com`. An operator running its own
+    /// deployment points this at that one instead.
+    pub base_url: String,
+    /// Sent as `x-api-key` where the deployment requires one.
     pub api_key: Option<String>,
 }
 
