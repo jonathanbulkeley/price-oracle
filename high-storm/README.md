@@ -423,7 +423,7 @@ An attestation says that the member saw that price, not that the price is
 right. A feed with no source of its own never becomes available and answers
 `503` permanently, and so does a Cross pair whose legs have none.
 
-Three sources can be polled, each enabled by its own `service.price_sources`
+Four sources can be polled, each enabled by its own `service.price_sources`
 section and each polled on its own task for every feed it prices. CoinGecko
 prices LBTC, USDt and USDC against USD and takes an optional Demo API key.
 Blockstream prices LBTC, USDt, EURx and DePix from its Liquid asset price API
@@ -437,7 +437,13 @@ where LBTC, EURx and DePix trade against USDt and prices each at the midpoint
 of the best bid and ask among the orders whose makers are online, then converts
 that to USD with the node's own USDT/USD value. It gives no price at all unless
 another source prices USDT/USD, and what it gives expires no later than that
-value does.
+value does. Mycelia Signal prices LBTC, USDt, USDC, EURx and DePix against USD,
+the last two by the currency each is pegged to (EUR and BRL), each a median of
+sources outside Liquid, computed when it is asked. It reads the price out
+of the canonical string its service signs rather than a convenience field, and
+refuses an answer for another pair or with more precision than the feed holds.
+Its USDT/USD is one SideSwap can convert with, so EURx and DePix keep a price
+when CoinGecko is frozen or not configured.
 
 A node's operator can freeze a source the node polls, for example one that
 publishes wrong prices. `GET /operators/price-sources` lists every Direct feed
