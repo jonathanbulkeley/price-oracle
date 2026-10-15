@@ -121,6 +121,7 @@ pub struct PriceSourcesConfig {
     pub coingecko: Option<CoinGeckoConfig>,
     pub blockstream: Option<BlockstreamConfig>,
     pub sideswap: Option<SideSwapConfig>,
+    pub myceliasignal: Option<MyceliaSignalConfig>,
 }
 
 /// The Blockstream price API needs no credentials; the section's presence is
@@ -131,6 +132,17 @@ pub struct BlockstreamConfig {}
 /// SideSwap's public API needs no credentials either.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SideSwapConfig {}
+
+/// Mycelia Signal's price service, which signs each price it answers with.
+#[derive(Clone, Debug, Deserialize)]
+pub struct MyceliaSignalConfig {
+    /// The base URL of the price service, without a trailing path, for example
+    /// `https://prices.myceliasignal.com`. An operator running its own
+    /// deployment points this at that one instead.
+    pub base_url: String,
+    /// Sent as `x-api-key` where the deployment requires one.
+    pub api_key: Option<String>,
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct CoinGeckoConfig {

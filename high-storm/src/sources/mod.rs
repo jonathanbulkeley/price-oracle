@@ -1,5 +1,6 @@
 pub mod blockstream;
 pub mod coingecko;
+pub mod myceliasignal;
 pub mod sideswap;
 
 use std::{future::Future, sync::Arc, time::Duration};
@@ -15,6 +16,7 @@ use crate::{HighStormHandle, config::PriceSourcesConfig, high_storm::PollOutcome
 
 use blockstream::Blockstream;
 use coingecko::CoinGecko;
+use myceliasignal::MyceliaSignal;
 use sideswap::SideSwap;
 
 /// Each source's index in every feed's state, for this run only: a persisted
@@ -22,6 +24,7 @@ use sideswap::SideSwap;
 const COINGECKO: usize = 0;
 const BLOCKSTREAM: usize = 1;
 const SIDESWAP: usize = 2;
+const MYCELIA_SIGNAL: usize = 3;
 
 /// CoinGecko's edge refuses a request that names no client.
 const USER_AGENT: &str = concat!("high-storm/", env!("CARGO_PKG_VERSION"));
@@ -35,7 +38,11 @@ pub fn spawn(
     node: HighStormHandle,
 ) -> Result<Arc<Notify>, reqwest::Error> {
     let observed = Arc::new(Notify::new());
-    if config.coingecko.is_none() && config.blockstream.is_none() && config.sideswap.is_none() {
+    if config.coingecko.is_none()
+        && config.blockstream.is_none()
+        && config.sideswap.is_none()
+        && config.myceliasignal.is_none()
+    {
         tracing::warn!("no price source is configured, so this node attests no prices");
     }
     if let Some(coingecko) = &config.coingecko {
@@ -59,6 +66,18 @@ pub fn spawn(
         let source = SideSwap::new(sideswap, node.clone());
         let feeds: Vec<_> = source.feeds().collect();
         spawn_source(source, SIDESWAP, SideSwap::NAME, feeds, &node, &observed);
+    }
+    if let Some(myceliasignal) = &config.myceliasignal {
+        let source = MyceliaSignal::new(myceliasignal)?;
+        let feeds: Vec<_> = source.feeds().collect();
+        spawn_source(
+            source,
+            MYCELIA_SIGNAL,
+            MyceliaSignal::NAME,
+            feeds,
+            &node,
+            &observed,
+        );
     }
     Ok(observed)
 }
