@@ -9,13 +9,18 @@ use std::{
 use futures_util::{SinkExt, StreamExt};
 use high_storm::{
     HighStorm, HighStormHandle,
+    config::MyceliaSignalConfig,
     high_storm::PollOutcome,
     initialize_host,
-    sources::{coingecko::CoinGecko, sideswap::SideSwap},
+    sources::{coingecko::CoinGecko, myceliasignal::MyceliaSignal, sideswap::SideSwap},
 };
 use price_feed::{FeedId, SourceObservation, constants::MAX_POLLING_ERROR_NUM};
 use serde_json::{Value, json};
-use tokio::{net::TcpListener, time::timeout};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    time::timeout,
+};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use common::TestNode;
@@ -29,6 +34,7 @@ const LBTC_USDT: FeedId = 4;
 /// Where each source sits in a feed's state, as `sources::spawn` places them.
 const COINGECKO: usize = 0;
 const SIDESWAP: usize = 2;
+const MYCELIA_SIGNAL: usize = 3;
 
 const LBTC: &str = "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d";
 const USDT: &str = "ce091c998b83c78bb71a632313ba3760f1763d9cfcffae02258ffa9865a37bd2";
@@ -177,6 +183,62 @@ async fn sideswap_drops_out_once_its_usdt_usd_source_is_frozen() {
     network.shutdown().await;
 }
 
+#[tokio::test]
+async fn mycelia_signal_gives_sideswap_its_usdt_usd_without_coingecko() {
+    let network = Network::start().await;
+    let node = network.node.handle();
+    network.sideswap.quote(EURX, USDT, 1.1, 1.14);
+    network.sideswap.quote(USDT, DEPIX, 5.0, 5.2);
+    let sideswap = SideSwap::at(&network.sideswap.url, node.clone());
+    let service = FakeMyceliaSignal::start(&[
+        ("/oracle/price/usdt/usd", "USDTUSD", "1"),
+        ("/oracle/price/eur/usd", "EURUSD", "1.12"),
+        ("/oracle/price/brl/usd", "BRLUSD", "0.19607843"),
+    ])
+    .await;
+    let mycelia_signal = MyceliaSignal::new(&MyceliaSignalConfig {
+        base_url: service.url.clone(),
+        api_key: None,
+    })
+    .unwrap();
+
+    // No CoinGecko, so nothing prices USDT/USD for SideSwap to convert with.
+    register(&node, EURX_USD, SIDESWAP, SideSwap::NAME).await;
+    assert_eq!(
+        node.poll_price_source(EURX_USD, SIDESWAP, &sideswap).await,
+        PollOutcome::Failed
+    );
+
+    for feed in [USDT_USD, EURX_USD, DEPIX_USD] {
+        register(&node, feed, MYCELIA_SIGNAL, MyceliaSignal::NAME).await;
+        assert_eq!(
+            node.poll_price_source(feed, MYCELIA_SIGNAL, &mycelia_signal)
+                .await,
+            PollOutcome::Observed
+        );
+    }
+    register(&node, DEPIX_USD, SIDESWAP, SideSwap::NAME).await;
+    for feed in [EURX_USD, DEPIX_USD] {
+        assert_eq!(
+            node.poll_price_source(feed, SIDESWAP, &sideswap).await,
+            PollOutcome::Observed
+        );
+    }
+
+    let price = |feed| {
+        let node = node.clone();
+        async move { node.price_feed_value(feed).await.unwrap().price }
+    };
+    // USDt is Mycelia Signal's alone.
+    assert_eq!(price(USDT_USD).await, DOLLAR);
+    // Both sources give EURx 1.12 and DePix 1 / 5.1, SideSwap converting its
+    // USDt price with Mycelia Signal's USDT/USD.
+    assert_eq!(price(EURX_USD).await, 112_000_000);
+    assert_eq!(price(DEPIX_USD).await, 19_607_843);
+
+    network.shutdown().await;
+}
+
 /// A single node, which prices feeds without needing any peer, and a stand-in
 /// for SideSwap's API.
 struct Network {
@@ -280,6 +342,57 @@ async fn answer(stream: tokio::net::TcpStream, books: Books) {
     }
     // Held open until the source closes it.
     while let Some(Ok(_)) = socket.next().await {}
+}
+
+/// Answers each route as Mycelia Signal's price service does, with a signed
+/// envelope whose canonical names the pair, the price and when it was computed.
+struct FakeMyceliaSignal {
+    url: String,
+}
+
+impl FakeMyceliaSignal {
+    async fn start(routes: &[(&'static str, &'static str, &'static str)]) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let routes = routes.to_vec();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(answer_http(stream, routes.clone()));
+            }
+        });
+        Self { url }
+    }
+}
+
+async fn answer_http(
+    mut stream: tokio::net::TcpStream,
+    routes: Vec<(&'static str, &'static str, &'static str)>,
+) {
+    let mut request = Vec::new();
+    let mut chunk = [0u8; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => request.extend_from_slice(&chunk[..read]),
+        }
+    }
+    let request = String::from_utf8_lossy(&request);
+    let path = request.split_whitespace().nth(1).unwrap_or_default();
+    let route = routes.iter().find(|(route, _, _)| *route == path);
+
+    let (status, body) = match route {
+        Some((_, pair, value)) => {
+            let canonical = format!("v1|PRICE|{pair}|{value}|USD|8|a,b,c|median|{}|1", now());
+            let body = json!({ "canonical": canonical, "signature": "", "pubkey": "" });
+            ("200 OK", body.to_string())
+        }
+        None => ("404 Not Found", String::new()),
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
 }
 
 async fn register(node: &HighStormHandle, feed: FeedId, index: usize, name: &'static str) {
